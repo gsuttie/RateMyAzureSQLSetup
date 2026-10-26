@@ -1,0 +1,320 @@
+@inject SqlFlowService Flows
+
+@if (Scan is null)
+{
+    <div class="card empty"><p>No scan yet. <a href="/@Flow.Route()">Choose a scope</a> first.</p></div>
+    return;
+}
+
+<div class="card">
+    <div class="card-head">
+        <h2 class="card-title">3 · Improve the backups</h2>
+        <span class="muted small">Pick a target, see what would change per database, generate the script. Nothing is applied by this app.</span>
+    </div>
+    <p class="muted small">
+        A backup plan is four decisions: how far back you can restore to any point in time, which weekly / monthly / yearly
+        full backups are kept long term, where the backup copies live, and whether a replica is ready in another zone or region.
+        Start from a preset, then adjust.
+    </p>
+
+    <div class="presets">
+        @foreach (var p in BackupPlanService.Presets)
+        {
+            <button class="preset @(_presetKey == p.Key ? "active" : "")" @onclick="() => ApplyPreset(p)">
+                <b>@p.Label</b>
+                <span>@p.Description</span>
+            </button>
+        }
+        <button class="preset @(_presetKey == "custom" ? "active" : "")" @onclick="@(() => _presetKey = "custom")">
+            <b>Custom</b>
+            <span>Set every value yourself below.</span>
+        </button>
+    </div>
+
+    <div class="plan-grid">
+        <label class="field">
+            <span class="field-label">Point-in-time retention</span>
+            <select class="select" value="@_plan.PitrDays" @onchange="SetPitr">
+                @foreach (var d in BackupPlanService.PitrChoices) { <option value="@d">@d day@(d == 1 ? "" : "s")</option> }
+            </select>
+        </label>
+        @if (Flow == SqlFlowKind.SqlDatabase)
+        {
+            <label class="field">
+                <span class="field-label">Differential backups</span>
+                <select class="select" value="@_plan.DiffHours" @onchange="SetDiff">
+                    <option value="12">every 12 hours</option>
+                    <option value="24">every 24 hours</option>
+                </select>
+            </label>
+        }
+        <label class="field">
+            <span class="field-label">Weekly backups kept</span>
+            <select class="select" value="@_plan.Weekly" @onchange="SetWeekly">
+                @foreach (var w in BackupPlanService.WeeklyChoices) { <option value="@w">@SqlDatabaseInfo.DurationLabel(w)</option> }
+            </select>
+        </label>
+        <label class="field">
+            <span class="field-label">Monthly backups kept</span>
+            <select class="select" value="@_plan.Monthly" @onchange="SetMonthly">
+                @foreach (var m in BackupPlanService.MonthlyChoices) { <option value="@m">@SqlDatabaseInfo.DurationLabel(m)</option> }
+            </select>
+        </label>
+        <label class="field">
+            <span class="field-label">Yearly backups kept</span>
+            <select class="select" value="@_plan.Yearly" @onchange="SetYearly">
+                @foreach (var y in BackupPlanService.YearlyChoices) { <option value="@y">@SqlDatabaseInfo.DurationLabel(y)</option> }
+            </select>
+        </label>
+        <label class="field">
+            <span class="field-label">Backup storage redundancy</span>
+            <select class="select" value="@_plan.Redundancy" @onchange="SetRedundancy">
+                @foreach (var (key, label) in BackupPlanService.RedundancyChoices) { <option value="@key">@label</option> }
+            </select>
+        </label>
+        <label class="check"><input type="checkbox" checked="@_plan.ZoneRedundant" @onchange="SetZone" /> Zone redundant</label>
+        <label class="check"><input type="checkbox" checked="@_plan.FailoverGroup" @onchange="SetFog" /> Failover group in the paired region</label>
+    </div>
+
+    <div class="plan-summary">
+        <span class="chip"><Icon Name="clock" Size="12" /> PITR @_plan.PitrDays d</span>
+        @if (Flow == SqlFlowKind.SqlDatabase) { <span class="chip">diff @_plan.DiffHours h</span> }
+        <span class="chip"><Icon Name="backup" Size="12" /> LTR @BackupPlanService.LtrLabel(_plan.Weekly, _plan.Monthly, _plan.Yearly)</span>
+        <span class="chip"><Icon Name="globe" Size="12" /> @BackupPlanService.RedundancyLabel(_plan.Redundancy)</span>
+        @if (_plan.ZoneRedundant) { <span class="chip">zone redundant</span> }
+        @if (_plan.FailoverGroup) { <span class="chip">failover group</span> }
+        <button class="link small" @onclick="() => _showCosts = !_showCosts">@(_showCosts ? "Hide" : "What does this cost?")</button>
+    </div>
+    @if (_showCosts)
+    {
+        <ul class="cost-notes">
+            @foreach (var n in BackupPlanService.CostNotes) { <li>@n</li> }
+        </ul>
+    }
+</div>
+
+<div class="card">
+    <div class="card-head">
+        <h2 class="card-title">Databases <span class="count">@Rated.Count</span></h2>
+        <span class="sub-list-tools">
+            <button class="link" @onclick="SelectAll">Select all</button>
+            <button class="link" @onclick="SelectNeedingChanges">Select those with changes</button>
+            <button class="link" @onclick="() => _selected.Clear()">Clear</button>
+        </span>
+    </div>
+    <div class="table-wrap">
+        <table class="table db-table">
+            <thead>
+                <tr><th class="chk"></th><th>Database</th><th>Tier</th><th>PITR</th><th>Long-term retention</th><th>Backup storage</th><th>Geo / zone</th><th class="num">Backups</th><th>With this plan</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var group in Rated.GroupBy(d => d.ServerId).OrderBy(g => Scan.Server(g.Key)?.Name ?? g.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    var server = Scan.Server(group.Key);
+                    var serverDbs = group.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase).ToList();
+                    <tr class="group-row">
+                        <td colspan="10">
+                            <Icon Name="@(Flow == SqlFlowKind.SqlDatabase ? "server" : "server")" Size="14" /> @(server?.Name ?? group.Key)
+                            <span class="muted small">· @Flows.SubscriptionName(serverDbs[0].SubscriptionId)@(server is null ? "" : $" · {server.Location}")</span>
+                            <button class="link" @onclick="() => SelectServer(group.Key)">Select all on this @Flow.HostLabel()</button>
+                            <button class="link" @onclick="() => OpenScript(serverDbs)">Script this @Flow.HostLabel()</button>
+                        </td>
+                    </tr>
+                    @foreach (var d in serverDbs)
+                    {
+                        var changes = BackupPlanService.Describe(d, server, _plan, EnabledOptions);
+                        var rating = Scan.Ratings.First(r => r.TargetId.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                        var open = _expanded.Contains(d.Id);
+                        var selected = _selected.Contains(d.Id);
+                        <tr class="@(selected ? "selected" : "")">
+                            <td class="chk"><input type="checkbox" checked="@selected" @onchange="() => ToggleSelected(d.Id)" /></td>
+                            <td><b>@d.Name</b></td>
+                            <td class="small">@d.TierLabel</td>
+                            <td>@(d.PitrRetentionDays is { } p ? $"{p} d" : "?")@(d.DiffBackupIntervalHours is { } h ? $" · {h} h" : "")</td>
+                            <td class="small">@(d.LtrRead ? BackupPlanService.LtrLabel(d.WeeklyRetention, d.MonthlyRetention, d.YearlyRetention) : "unknown")</td>
+                            <td class="small">@BackupPlanService.RedundancyLabel(d.BackupStorageRedundancy)</td>
+                            <td class="small">@(d.HasFailoverGroup ? "failover group" : d.GeoReplicas.Count > 0 ? "geo-replica" : "none")@(d.ZoneRedundant ? " · ZR" : "")</td>
+                            <td class="num score-cell @(rating.BackupScore == SqlRatingService.BackupPts ? "ok" : rating.BackupScore < SqlRatingService.BackupPts / 2 ? "bad" : "")">@rating.BackupScore<span class="muted">/@SqlRatingService.BackupPts</span></td>
+                            <td>
+                                @if (changes.Count == 0) { <span class="changes-count none">matches</span> }
+                                else { <button class="changes-count link" @onclick="() => ToggleExpanded(d.Id)">@changes.Count change@(changes.Count == 1 ? "" : "s")</button> }
+                            </td>
+                            <td><button class="link small" @onclick="() => ToggleExpanded(d.Id)">@(open ? "Hide" : "Detail")</button></td>
+                        </tr>
+                        @if (open)
+                        {
+                            <tr class="detail-row">
+                                <td colspan="10">
+                                    <div class="detail-grid">
+                                        <div>
+                                            <h4>Changes with this plan</h4>
+                                            @if (changes.Count == 0)
+                                            {
+                                                <p class="ok small"><Icon Name="check" Size="14" /> Already matches the plan.</p>
+                                            }
+                                            else
+                                            {
+                                                <ul class="changes">
+                                                    @foreach (var c in changes)
+                                                    {
+                                                        <li><b>@c.Setting:</b> <span class="from">@c.From</span> <Icon Name="arrow" Size="12" /> <span class="to">@c.To</span>@if (c.Note is not null) { <span class="note">(@c.Note)</span> }</li>
+                                                    }
+                                                </ul>
+                                                <p class="small mt"><button class="btn btn-primary btn-sm" @onclick="() => OpenScript([d])"><Icon Name="terminal" Size="14" /> Script for @d.Name</button></p>
+                                            }
+                                            @if (rating.BackupImprovements.Any())
+                                            {
+                                                <h4 class="mt">Points on the table</h4>
+                                                <ul class="improvements">
+                                                    @foreach (var imp in rating.BackupImprovements) { <li><span class="pts">+@imp.PointsGained</span><span>@imp.Action</span></li> }
+                                                </ul>
+                                            }
+                                        </div>
+                                        <div>
+                                            <h4>Restore points</h4>
+                                            <dl class="glance">
+                                                <dt>Earliest point-in-time</dt><dd>@(d.EarliestRestoreDate is { } e ? $"{e:yyyy-MM-dd HH:mm} UTC" : "unknown")</dd>
+                                                <dt>Window</dt><dd>@(d.PitrRetentionDays is { } pd ? $"{pd} days (log backups every 5–10 min)" : "unknown")</dd>
+                                            </dl>
+                                            <h4 class="mt">Long-term retention backups</h4>
+                                            @if (!d.HasLtr)
+                                            {
+                                                <p class="muted small">No long-term retention policy, so no long-term backups exist.</p>
+                                            }
+                                            else if (_ltrLoading.Contains(d.Id))
+                                            {
+                                                <div class="loading small"><span class="spinner sm"></span> Listing backups…</div>
+                                            }
+                                            else if (_ltrErrors.TryGetValue(d.Id, out var err))
+                                            {
+                                                <p class="bad small">@err</p>
+                                            }
+                                            else if (State.LtrBackups.TryGetValue(d.Id, out var backups))
+                                            {
+                                                @if (backups.Count == 0)
+                                                {
+                                                    <p class="muted small">The policy is set but no long-term backup exists yet (the first one is taken at the next scheduled full backup).</p>
+                                                }
+                                                else
+                                                {
+                                                    <ul class="ltr-list">
+                                                        @foreach (var b in backups.Take(12))
+                                                        {
+                                                            <li><span class="mono">@b.BackupTime.ToString("yyyy-MM-dd HH:mm")</span><span class="muted">expires @(b.ExpirationTime?.ToString("yyyy-MM-dd") ?? "—")</span>@if (!string.IsNullOrEmpty(b.StorageRedundancy)) { <span class="chip">@b.StorageRedundancy</span> }</li>
+                                                        }
+                                                        @if (backups.Count > 12) { <li class="muted">… @(backups.Count - 12) more</li> }
+                                                    </ul>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-ghost btn-sm" @onclick="() => LoadLtrAsync(d)"><Icon Name="backup" Size="14" /> List the backups that exist</button>
+                                            }
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <div class="sticky-actions">
+        <span class="muted small">@_selected.Count selected · @ChangesForSelected change@(ChangesForSelected == 1 ? "" : "s") with this plan</span>
+        <button class="btn btn-primary" @onclick="OpenScriptForSelected" disabled="@(_selected.Count == 0)"><Icon Name="terminal" Size="16" /> Generate script for @_selected.Count database@(_selected.Count == 1 ? "" : "s")</button>
+        <button class="btn btn-ghost btn-sm" @onclick="() => _report.Open(true)"><Icon Name="doc" Size="14" /> Detailed report</button>
+    </div>
+    @if (_selected.Select(id => Scan.Database(id)?.ServerId).Distinct().Count() > 1)
+    {
+        <p class="small muted mt">The selection spans several @Flow.HostPluralLabel(); the script is generated per @Flow.HostLabel(), one after the other.</p>
+    }
+</div>
+
+<BackupPlanModal @ref="_modal" Flow="Flow" />
+<ReportModal @ref="_report" Flow="Flow" />
+
+@code {
+    [Parameter] public SqlFlowKind Flow { get; set; }
+
+    private BackupPlanModal _modal = default!;
+    private ReportModal _report = default!;
+    private FlowState State => Flows.State.For(Flow);
+    private SqlScanResult? Scan => State.Scan;
+
+    private string _presetKey = "recommended";
+    private BackupPlan _plan = BackupPlanService.Presets[1].Plan;
+    private bool _showCosts;
+    private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _expanded = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _ltrLoading = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _ltrErrors = new(StringComparer.OrdinalIgnoreCase);
+
+    private List<SqlDatabaseInfo> Rated => Scan is null ? [] :
+        Scan.Ratings.Select(r => Scan.Database(r.TargetId)).Where(d => d is not null).Select(d => d!).ToList();
+
+    private HashSet<string> EnabledOptions => BackupPlanService.DefaultOptions(Flow).Where(o => o.Enabled).Select(o => o.Key).ToHashSet();
+
+    private int ChangesForSelected => Scan is null ? 0 :
+        _selected.Sum(id => Scan.Database(id) is { } d ? BackupPlanService.Describe(d, Scan.Server(d.ServerId), _plan, EnabledOptions).Count : 0);
+
+    protected override void OnInitialized()
+    {
+        // Pre-select the databases that would change under the recommended plan, and open the weakest one.
+        SelectNeedingChanges();
+        if (Scan is { Ratings.Count: > 0 })
+            _expanded.Add(Scan.Ratings.OrderBy(r => r.BackupScore).First().TargetId);
+    }
+
+    private void ApplyPreset(BackupPlanService.Preset p) { _presetKey = p.Key; _plan = p.Plan; }
+    private void Set(Func<BackupPlan, BackupPlan> change) { _plan = change(_plan); _presetKey = "custom"; }
+    private void SetPitr(ChangeEventArgs e) => Set(p => p with { PitrDays = int.TryParse(e.Value?.ToString(), out var n) ? n : 7 });
+    private void SetDiff(ChangeEventArgs e) => Set(p => p with { DiffHours = int.TryParse(e.Value?.ToString(), out var n) ? n : 12 });
+    private void SetWeekly(ChangeEventArgs e) => Set(p => p with { Weekly = e.Value?.ToString() ?? "PT0S" });
+    private void SetMonthly(ChangeEventArgs e) => Set(p => p with { Monthly = e.Value?.ToString() ?? "PT0S" });
+    private void SetYearly(ChangeEventArgs e) => Set(p => p with { Yearly = e.Value?.ToString() ?? "PT0S" });
+    private void SetRedundancy(ChangeEventArgs e) => Set(p => p with { Redundancy = e.Value?.ToString() ?? "Geo" });
+    private void SetZone(ChangeEventArgs e) => Set(p => p with { ZoneRedundant = e.Value is true });
+    private void SetFog(ChangeEventArgs e) => Set(p => p with { FailoverGroup = e.Value is true });
+
+    private void ToggleSelected(string id) { if (!_selected.Remove(id)) _selected.Add(id); }
+    private void ToggleExpanded(string id) { if (!_expanded.Remove(id)) _expanded.Add(id); }
+    private void SelectAll() { foreach (var d in Rated) _selected.Add(d.Id); }
+    private void SelectServer(string serverId) { foreach (var d in Rated.Where(d => d.ServerId.Equals(serverId, StringComparison.OrdinalIgnoreCase))) _selected.Add(d.Id); }
+
+    private void SelectNeedingChanges()
+    {
+        _selected.Clear();
+        if (Scan is null) return;
+        foreach (var d in Rated)
+            if (BackupPlanService.Describe(d, Scan.Server(d.ServerId), _plan, EnabledOptions).Count > 0) _selected.Add(d.Id);
+    }
+
+    private void OpenScript(List<SqlDatabaseInfo> dbs) => _modal.Open(dbs, _plan);
+
+    private void OpenScriptForSelected()
+    {
+        if (Scan is null) return;
+        var dbs = Rated.Where(d => _selected.Contains(d.Id)).ToList();
+        if (dbs.Count > 0) _modal.Open(dbs, _plan);
+    }
+
+    private async Task LoadLtrAsync(SqlDatabaseInfo db)
+    {
+        _ltrLoading.Add(db.Id);
+        _ltrErrors.Remove(db.Id);
+        try
+        {
+            await Flows.GetLtrBackupsAsync(Flow, db);
+        }
+        catch (Exception ex)
+        {
+            _ltrErrors[db.Id] = "Could not list long-term backups: " + ex.Message;
+        }
+        finally
+        {
+            _ltrLoading.Remove(db.Id);
+        }
+    }
+}

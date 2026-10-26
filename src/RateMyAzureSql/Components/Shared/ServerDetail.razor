@@ -1,0 +1,124 @@
+@* Full detail for one logical server / managed instance: every setting that was read, firewall rules, failover groups, databases. *@
+<div class="policy-detail">
+    <div class="detail-grid">
+        <div>
+            <h4>Settings</h4>
+            <dl class="kv">
+                <dt>Endpoint</dt><dd class="mono">@(string.IsNullOrEmpty(Server.Fqdn) ? "—" : Server.Fqdn)</dd>
+                <dt>Resource group</dt><dd>@Server.ResourceGroup</dd>
+                <dt>Public access</dt><dd>@(Server.PublicNetworkAccess switch { true => "Enabled", false => "Disabled", _ => "Unknown" })@(Server.Kind == SqlFlowKind.ManagedInstance ? " (public data endpoint)" : "")</dd>
+                @if (Server.Kind == SqlFlowKind.SqlDatabase) { <dt>Private endpoints</dt><dd>@Server.PrivateEndpointCount</dd> }
+                else { <dt>Subnet</dt><dd class="mono">@(string.IsNullOrEmpty(Server.SubnetId) ? "—" : Services.Azure.Json.LastSegment(Server.SubnetId))</dd> }
+                <dt>Minimum TLS</dt><dd>@(string.IsNullOrEmpty(Server.MinimalTlsVersion) ? "Not enforced" : Server.MinimalTlsVersion)</dd>
+                <dt>SQL admin login</dt><dd>@(string.IsNullOrEmpty(Server.SqlAdminLogin) ? "—" : Server.SqlAdminLogin)</dd>
+                <dt>Microsoft Entra admin</dt><dd>@(Server.HasEntraAdmin ? $"{Server.EntraAdminLogin}{(string.IsNullOrEmpty(Server.EntraAdminType) ? "" : $" ({Server.EntraAdminType})")}" : "None")</dd>
+                <dt>Entra-only authentication</dt><dd>@(Server.HasEntraAdmin ? OnOff(Server.EntraOnlyAuthentication) : "n/a")</dd>
+                <dt>Defender for SQL</dt><dd>@OnOff(Server.DefenderEnabled)</dd>
+                <dt>Vulnerability assessment</dt><dd>@OnOff(Server.VulnerabilityAssessmentEnabled)</dd>
+                @if (Server.Kind == SqlFlowKind.SqlDatabase)
+                {
+                    <dt>Auditing</dt><dd>@OnOff(Server.AuditingEnabled)@(Server.AuditDestinations.Count > 0 ? $" → {string.Join(", ", Server.AuditDestinations)}" : "")@(Server.AuditRetentionDays is > 0 ? $" · {Server.AuditRetentionDays} days" : "")</dd>
+                }
+                <dt>TDE protector</dt><dd>@(string.IsNullOrEmpty(Server.EncryptionProtector) ? "Unknown" : Server.UsesCustomerManagedKey ? "Customer-managed key (Key Vault)" : "Service-managed key")</dd>
+                @if (Server.Kind == SqlFlowKind.ManagedInstance)
+                {
+                    <dt>Tier</dt><dd>@Server.Tier@(Server.VCores is { } v ? $" · {v} vCores" : "")</dd>
+                    <dt>Zone redundant</dt><dd>@(Server.ZoneRedundant ? "Yes" : "No")</dd>
+                    <dt>Backup storage</dt><dd>@BackupPlanService.RedundancyLabel(Server.BackupStorageRedundancy)</dd>
+                }
+            </dl>
+        </div>
+        <div>
+            @if (Server.Kind == SqlFlowKind.SqlDatabase)
+            {
+                <h4>Firewall rules <span class="count">@(Server.FirewallRules?.Count ?? 0)</span></h4>
+                @if (Server.FirewallRules is null)
+                {
+                    <p class="muted small">Firewall rules could not be read.</p>
+                }
+                else if (Server.PublicNetworkAccess == false)
+                {
+                    <p class="muted small">Public network access is disabled, so firewall rules do not apply@(Server.FirewallRules.Count > 0 ? $" ({Server.FirewallRules.Count} defined)" : "").</p>
+                }
+                else if (Server.FirewallRules.Count == 0)
+                {
+                    <p class="muted small">No firewall rules — nothing can connect over the public endpoint.</p>
+                }
+                else
+                {
+                    <ul class="fw-rules">
+                        @foreach (var r in Server.FirewallRules.OrderByDescending(r => r.AddressCount))
+                        {
+                            var cls = r.IsOpenToInternet ? "bad" : r.IsAllowAzureServices || r.IsBroad ? "warn" : "ok";
+                            <li class="@cls">
+                                <Icon Name="@(cls == "ok" ? "check" : "warn")" Size="14" />
+                                <b>@r.Name</b>
+                                <span class="mono">@r.Display</span>
+                                @if (r.IsOpenToInternet) { <span class="badge bad">entire internet</span> }
+                                else if (r.IsAllowAzureServices) { <span class="badge warn">all Azure services</span> }
+                                else if (r.IsBroad) { <span class="badge warn">@r.AddressCount.ToString("N0") addresses</span> }
+                            </li>
+                        }
+                    </ul>
+                }
+            }
+
+            <h4 class="@(Server.Kind == SqlFlowKind.SqlDatabase ? "mt" : "")">Failover groups <span class="count">@Server.FailoverGroups.Count</span></h4>
+            @if (Server.FailoverGroups.Count == 0)
+            {
+                <p class="muted small">No failover group — a regional outage means restoring from geo-backup.</p>
+            }
+            else
+            {
+                <ul class="rulesets">
+                    @foreach (var f in Server.FailoverGroups)
+                    {
+                        <li>
+                            <b>@f.Name</b> <span class="muted small">· @f.ReplicationRole · partner @f.PartnerServer@(string.IsNullOrEmpty(f.PartnerLocation) ? "" : $" ({f.PartnerLocation})") · @f.FailoverPolicy failover@(f.GracePeriodMinutes is { } g && f.FailoverPolicy.Equals("Automatic", StringComparison.OrdinalIgnoreCase) ? $", {g} min grace" : "")</span>
+                            @if (f.DatabaseIds.Count > 0) { <div class="small muted">@f.DatabaseIds.Count database(s): @string.Join(", ", f.DatabaseIds.Select(Services.Azure.Json.LastSegment))</div> }
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+    </div>
+
+    <h4 class="mt">Databases <span class="count">@Databases.Count</span></h4>
+    @if (Databases.Count == 0)
+    {
+        <p class="muted small">No user databases.</p>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table inner">
+                <thead><tr><th>Database</th><th>Tier</th><th>Grade</th><th>PITR</th><th>Long-term retention</th><th>Backup storage</th><th>Geo / zone</th><th>TDE</th></tr></thead>
+                <tbody>
+                    @foreach (var d in Databases)
+                    {
+                        var rating = Scan.Ratings.FirstOrDefault(r => r.TargetId.Equals(d.Id, StringComparison.OrdinalIgnoreCase));
+                        <tr>
+                            <td><b>@d.Name</b>@if (d.IsGeoSecondary) { <span class="chip warn">geo-secondary</span> }@if (d.IsDataWarehouse) { <span class="chip warn">data warehouse</span> }</td>
+                            <td>@d.TierLabel</td>
+                            <td>@if (rating is not null) { <GradeBadge Grade="@rating.Grade" Small="true" /> } else { <span class="muted small">not rated</span> }</td>
+                            <td>@(d.PitrRetentionDays is { } p ? $"{p} d" : "—")</td>
+                            <td class="small">@(d.LtrRead ? BackupPlanService.LtrLabel(d.WeeklyRetention, d.MonthlyRetention, d.YearlyRetention) : "—")</td>
+                            <td>@BackupPlanService.RedundancyLabel(d.BackupStorageRedundancy)</td>
+                            <td class="small">@(d.HasFailoverGroup ? "failover group" : d.GeoReplicas.Count > 0 ? "geo-replica" : "no geo")@(d.ZoneRedundant ? " · zone redundant" : "")</td>
+                            <td>@(d.TdeEnabled switch { true => "On", false => "Off", _ => "?" })</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public SqlServerInfo Server { get; set; } = default!;
+    [Parameter, EditorRequired] public SqlScanResult Scan { get; set; } = default!;
+
+    private List<SqlDatabaseInfo> Databases => Scan.DatabasesOn(Server.Id).OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase).ToList();
+
+    private static string OnOff(bool? v) => v switch { true => "On", false => "Off", _ => "Unknown" };
+}

@@ -1,0 +1,64 @@
+@inherits LayoutComponentBase
+@inject NavigationManager Nav
+@inject SessionState State
+@inject SqlFlowService Flows
+@inject IJSRuntime JS
+
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="brand" href="/">
+            <Icon Name="database" Size="26" />
+            <span>Rate<b>My</b>AzureSQL</span>
+        </a>
+        <nav class="flow-tabs">
+            <a class="flow-tab @(IsActive("sql-database") ? "active" : "")" href="/sql-database">
+                <Icon Name="database" Size="16" /> SQL Databases
+            </a>
+            <a class="flow-tab @(IsActive("managed-instance") ? "active" : "")" href="/managed-instance">
+                <Icon Name="server" Size="16" /> Managed Instances
+            </a>
+        </nav>
+        <div class="topbar-right">
+            @if (State.DemoMode)
+            {
+                <button class="pill pill-demo" title="Sample data is shown. Click to switch back to Azure." @onclick="LeaveDemo">Sample data</button>
+            }
+            <button class="icon-btn" title="Toggle light / dark" onclick="rms.toggleTheme()">
+                <Icon Name="theme" Size="18" />
+            </button>
+        </div>
+    </div>
+</header>
+
+<main class="page">
+    @Body
+</main>
+
+<footer class="footer">
+    Read-only assessment: RateMyAzureSQL never changes an Azure resource. Grades follow a 100-point model (50 security, 50 backups) with hard caps; the scripts it generates are for you to review and run.
+</footer>
+
+<div id="blazor-error-ui" class="blazor-error">
+    Something went wrong on the server. <a href="" class="reload">Reload</a>
+    <a class="dismiss">✕</a>
+</div>
+
+@implements IDisposable
+
+@code {
+    protected override void OnInitialized() => State.Changed += OnStateChanged;
+
+    private void OnStateChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => State.Changed -= OnStateChanged;
+
+    private bool IsActive(string route) =>
+        Nav.ToBaseRelativePath(Nav.Uri).StartsWith(route, StringComparison.OrdinalIgnoreCase);
+
+    private async Task LeaveDemo()
+    {
+        Flows.ExitDemoMode();
+        try { await JS.InvokeVoidAsync("rms.setItem", "rms.demo", null); } catch { }
+        Nav.NavigateTo("/", forceLoad: false);
+    }
+}

@@ -1,0 +1,9 @@
+@page "/sql-database"
+@page "/sql-database/{Step}"
+
+<PageTitle>SQL Databases · RateMyAzureSQL</PageTitle>
+<SqlFlow Flow="SqlFlowKind.SqlDatabase" Step="@Step" />
+
+@code {
+    [Parameter] public string? Step { get; set; }
+}

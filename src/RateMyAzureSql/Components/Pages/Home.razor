@@ -1,0 +1,91 @@
+@page "/"
+@inject SqlFlowService Flows
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<PageTitle>RateMyAzureSQL</PageTitle>
+
+<section class="hero">
+    <h1>How safe is your Azure SQL?</h1>
+    <p class="lead">
+        RateMyAzureSQL finds every Azure SQL database in your tenant, grades each one from <b>A</b> to <b>F</b> on
+        <b>security</b> (network exposure, identity, threat protection, encryption) and <b>backups</b> (point-in-time
+        restore, long-term retention, backup storage redundancy, geo and zone resilience), and tells you exactly which
+        change lifts the grade — with ready-made scripts for the backup changes. Read-only, three steps, one product at a time.
+    </p>
+</section>
+
+<section class="flow-cards">
+    <a class="flow-card" href="/sql-database">
+        <div class="flow-card-icon"><Icon Name="database" Size="30" /></div>
+        <h2>SQL Databases</h2>
+        <p>Logical servers and their databases, elastic pools included. Server settings (firewall, Entra admin, Defender, auditing, TLS) count for every database on the server.</p>
+        <span class="btn btn-primary">Rate SQL Databases <Icon Name="arrow" Size="16" /></span>
+    </a>
+    <a class="flow-card" href="/managed-instance">
+        <div class="flow-card-icon"><Icon Name="server" Size="30" /></div>
+        <h2>Managed Instances</h2>
+        <p>SQL Managed Instances and their databases. Public data endpoint, Entra admin, Defender, instance-level backup storage redundancy, zone redundancy and instance failover groups.</p>
+        <span class="btn btn-primary">Rate Managed Instances <Icon Name="arrow" Size="16" /></span>
+    </a>
+</section>
+
+<section class="card">
+    <h2 class="card-title">How the grade is built</h2>
+    <p class="muted">100 points per database, half for security and half for backups, mapped to a letter. Hard caps stop a good score hiding a critical gap.</p>
+
+    <div class="weights-group">
+        <div class="weights-group-title"><Icon Name="shield" Size="14" /> Security <span class="total">50</span></div>
+        <div class="weights">
+            <div class="weight"><span class="weight-pts">15</span><span class="weight-name">Network exposure</span><span class="weight-desc">Public access off 15 · public with narrow firewall 8 · open to the internet 0</span></div>
+            <div class="weight"><span class="weight-pts">10</span><span class="weight-name">Identity &amp; access</span><span class="weight-desc">Microsoft Entra admin 5 · Entra-only authentication 5</span></div>
+            <div class="weight"><span class="weight-pts">15</span><span class="weight-name">Threat protection &amp; auditing</span><span class="weight-desc">Defender for SQL 6 · vulnerability assessment 3 · auditing 6</span></div>
+            <div class="weight"><span class="weight-pts">10</span><span class="weight-name">Encryption</span><span class="weight-desc">Transparent data encryption 7 · minimum TLS 1.2 3</span></div>
+        </div>
+    </div>
+    <div class="weights-group">
+        <div class="weights-group-title"><Icon Name="backup" Size="14" /> Backups <span class="total">50</span></div>
+        <div class="weights">
+            <div class="weight"><span class="weight-pts">15</span><span class="weight-name">Point-in-time restore</span><span class="weight-desc">35 days 15 · 28 days 13 · 14 days 11 · 7 days 8</span></div>
+            <div class="weight"><span class="weight-pts">15</span><span class="weight-name">Long-term retention</span><span class="weight-desc">Weekly 5 · monthly 5 · yearly 5</span></div>
+            <div class="weight"><span class="weight-pts">10</span><span class="weight-name">Backup storage redundancy</span><span class="weight-desc">Geo / geo-zone 10 · zone 5 · local 0</span></div>
+            <div class="weight"><span class="weight-pts">10</span><span class="weight-name">Geo &amp; zone resilience</span><span class="weight-desc">Failover group 6 (geo-replica only 4) · zone redundant 4</span></div>
+        </div>
+    </div>
+
+    <div class="legend-grid">
+        @foreach (var (g, label, desc) in SqlRatingService.Legend)
+        {
+            <div class="legend-row" style="background:@(SqlRatingService.ColorForGrade(g))1A;">
+                <GradeBadge Grade="@g" Small="true" />
+                <div><b style="color:@SqlRatingService.ColorForGrade(g);">@label</b> <span class="muted">· @Band(g)</span><div class="small">@desc</div></div>
+            </div>
+        }
+    </div>
+    <p class="small muted caps">
+        <b>Caps:</b> open to the whole internet → at most D · TDE off → at most D · locally redundant backups → at most C ·
+        no long-term retention, no Defender for SQL or no Microsoft Entra admin → at most B.
+    </p>
+</section>
+
+<section class="card demo-strip">
+    <div>
+        <h2 class="card-title">No Azure access right now?</h2>
+        <p class="muted">Explore both flows with a realistic sample estate. Nothing is sent to Azure.</p>
+    </div>
+    <button class="btn btn-ghost" @onclick="TryDemo"><Icon Name="spark" Size="16" /> Try with sample data</button>
+</section>
+
+@code {
+    private static string Band(string grade) => grade switch
+    {
+        "A" => "90–100", "B" => "75–89", "C" => "60–74", "D" => "45–59", "E" => "30–44", _ => "0–29"
+    };
+
+    private async Task TryDemo()
+    {
+        Flows.EnterDemoMode();
+        try { await JS.InvokeVoidAsync("rms.setItem", "rms.demo", "1"); } catch { }
+        Nav.NavigateTo("/sql-database");
+    }
+}

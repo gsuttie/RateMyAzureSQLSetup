@@ -1,0 +1,368 @@
+@inject SqlFlowService Flows
+@inject NavigationManager Nav
+
+@if (Scan is null)
+{
+    <div class="card empty"><p>No scan yet. <a href="/@Flow.Route()">Choose a scope</a> first.</p></div>
+    return;
+}
+
+<div class="results-bar">
+    <span class="muted small">
+        Scanned @Scan.SubscriptionIds.Count subscription@(Scan.SubscriptionIds.Count == 1 ? "" : "s") · @Scan.CompletedAt.ToString("yyyy-MM-dd HH:mm")
+        @if (Flows.State.DemoMode) { <span class="pill pill-demo sm">sample</span> }
+    </span>
+    <span class="results-actions">
+        <a class="btn btn-ghost btn-sm" href="/@Flow.Route()"><Icon Name="refresh" Size="14" /> Rescan</a>
+        <button class="btn btn-ghost btn-sm" @onclick="() => _report.Open(false)"><Icon Name="doc" Size="14" /> Summary report</button>
+        <button class="btn btn-ghost btn-sm" @onclick="() => _report.Open(true)"><Icon Name="doc" Size="14" /> Detailed report</button>
+        @if (Scan.Ratings.Count > 0)
+        {
+            <a class="btn btn-primary btn-sm" href="/@Flow.Route()/backups"><Icon Name="backup" Size="14" /> Improve backups</a>
+        }
+    </span>
+</div>
+
+@foreach (var w in Scan.Warnings.Distinct())
+{
+    <div class="notice notice-warn"><Icon Name="warn" Size="16" /><span class="small">@w</span></div>
+}
+
+@if (Scan.Ratings.Count == 0)
+{
+    <div class="card empty">
+        <h2>No databases to rate</h2>
+        <p class="muted">The selected subscriptions contain no ratable @Flow.Label() databases.
+            @if (Scan.Servers.Count > 0) { <span>@Scan.Servers.Count @(Scan.Servers.Count == 1 ? Flow.HostLabel() : Flow.HostPluralLabel()) found; see below.</span> }
+        </p>
+    </div>
+}
+else
+{
+    var worst = SqlRatingService.Worst(Scan.Ratings)!;
+    var avg = (int)Math.Round(Scan.Ratings.Average(r => r.Score));
+    var avgSec = (int)Math.Round(Scan.Ratings.Average(r => r.SecurityScore));
+    var avgBak = (int)Math.Round(Scan.Ratings.Average(r => r.BackupScore));
+    <section class="card overall">
+        <div class="overall-grade">
+            <GradeBadge Grade="@worst.Grade" Large="true" />
+            <div>
+                <div class="overall-label" style="color:@SqlRatingService.ColorForGrade(worst.Grade);">@worst.GradeLabel.ToUpperInvariant()</div>
+                <div class="muted small">
+                    @if (Scan.Ratings.Count == 1)
+                    {
+                        <span>'@worst.ServerName/@worst.TargetName' scores @worst.Score/100.</span>
+                    }
+                    else
+                    {
+                        <span>The weakest database sets the grade ('@worst.ServerName/@worst.TargetName', @worst.Score/100). Average @avg/100 across @Scan.Ratings.Count databases.</span>
+                    }
+                </div>
+                <button class="link small" @onclick="() => _showLegend = !_showLegend">@(_showLegend ? "Hide" : "Show") the A–F legend</button>
+            </div>
+        </div>
+        <div class="stat-tiles five">
+            <div class="stat"><span class="stat-num">@Scan.Ratings.Count</span><span class="stat-lbl">Databases rated</span></div>
+            <div class="stat"><span class="stat-num">@Scan.Servers.Count</span><span class="stat-lbl">@(Scan.Servers.Count == 1 ? Flow.HostLabel() : Flow.HostPluralLabel())</span></div>
+            <div class="stat"><span class="stat-num @ScoreClass(avgSec, SqlRatingService.SecurityPts)">@avgSec<span class="muted">/@SqlRatingService.SecurityPts</span></span><span class="stat-lbl">Security (avg)</span></div>
+            <div class="stat"><span class="stat-num @ScoreClass(avgBak, SqlRatingService.BackupPts)">@avgBak<span class="muted">/@SqlRatingService.BackupPts</span></span><span class="stat-lbl">Backups (avg)</span></div>
+            <div class="stat"><span class="stat-num @(HighFindings > 0 ? "bad" : "ok")">@HighFindings</span><span class="stat-lbl">High findings</span></div>
+        </div>
+        @if (_showLegend)
+        {
+            <div class="legend-grid mt">
+                @foreach (var (g, label, desc) in SqlRatingService.Legend)
+                {
+                    <div class="legend-row" style="background:@(SqlRatingService.ColorForGrade(g))1A;">
+                        <GradeBadge Grade="@g" Small="true" />
+                        <div><b style="color:@SqlRatingService.ColorForGrade(g);">@label</b><div class="small">@desc</div></div>
+                    </div>
+                }
+            </div>
+        }
+    </section>
+
+    <section class="rating-list">
+        @foreach (var r in Scan.Ratings.OrderByDescending(r => r.Grade, StringComparer.Ordinal).ThenBy(r => r.Score).ThenBy(r => r.TargetName, StringComparer.OrdinalIgnoreCase))
+        {
+            var open = _expanded.Contains(r.TargetId);
+            var db = Scan.Database(r.TargetId);
+            var server = Scan.Server(r.ServerId);
+            <article class="card rating @(open ? "open" : "")">
+                <button class="rating-row" @onclick="() => Toggle(r.TargetId)" aria-expanded="@open">
+                    <GradeBadge Grade="@r.Grade" />
+                    <span class="rating-name">
+                        <b>@r.TargetName <span class="muted">on @r.ServerName</span></b>
+                        <span class="chips">
+                            @if (db is not null && !string.IsNullOrEmpty(db.TierLabel)) { <span class="chip">@db.TierLabel</span> }
+                            <span class="chip muted">@Flows.SubscriptionName(r.SubscriptionId)</span>
+                            <span class="mini-score" title="Security points"><Icon Name="shield" Size="11" /> <b>@r.SecurityScore</b>/@SqlRatingService.SecurityPts</span>
+                            <span class="mini-score" title="Backup points"><Icon Name="backup" Size="11" /> <b>@r.BackupScore</b>/@SqlRatingService.BackupPts</span>
+                        </span>
+                    </span>
+                    <span class="rating-bar"><span style="width:@r.Score%;background:@SqlRatingService.ColorForGrade(r.Grade);"></span></span>
+                    <span class="rating-score">@r.Score<span class="muted">/100</span></span>
+                    <Icon Name="@(open ? "down" : "chevron")" Size="18" Class="muted" />
+                </button>
+
+                @if (r.CapReason is not null)
+                {
+                    <div class="cap"><Icon Name="lock" Size="14" /> Grade capped: @r.CapReason</div>
+                }
+                @if (!open && r.Improvements.Count > 0)
+                {
+                    <div class="next-fix"><Icon Name="bolt" Size="14" /> Biggest win: @r.Improvements[0].Action <span class="pts">+@r.Improvements[0].PointsGained</span></div>
+                }
+
+                @if (open)
+                {
+                    <div class="rating-detail">
+                        <div class="detail-grid">
+                            <div class="cats-split">
+                                <div>
+                                    <h4>Score breakdown</h4>
+                                    <h5><span class="area-pill security">Security</span> @r.SecurityScore/@SqlRatingService.SecurityPts</h5>
+                                    @CategoryTable(r.Categories.Where(c => c.Area == RatingArea.Security))
+                                    <h5 class="mt"><span class="area-pill backups">Backups</span> @r.BackupScore/@SqlRatingService.BackupPts</h5>
+                                    @CategoryTable(r.Categories.Where(c => c.Area == RatingArea.Backups))
+                                </div>
+                            </div>
+                            <div>
+                                <h4>How to improve</h4>
+                                @if (r.Improvements.Count == 0)
+                                {
+                                    <p class="ok small"><Icon Name="check" Size="14" /> Nothing to improve — full marks.</p>
+                                }
+                                else
+                                {
+                                    <ol class="improvements">
+                                        @foreach (var imp in r.Improvements)
+                                        {
+                                            <li>
+                                                <span class="pts">+@imp.PointsGained</span>
+                                                <span><span class="area-pill @imp.Area.ToLowerInvariant()">@imp.Area</span>@imp.Action
+                                                    @if (SqlRatingService.WorstGrade(imp.ResultingGrade, r.Grade) != imp.ResultingGrade)
+                                                    {
+                                                        <b style="color:@SqlRatingService.ColorForGrade(imp.ResultingGrade);"> → grade @imp.ResultingGrade</b>
+                                                    }
+                                                </span>
+                                            </li>
+                                        }
+                                    </ol>
+                                    @if (r.BackupImprovements.Any())
+                                    {
+                                        <p class="small mt"><a class="btn btn-ghost btn-sm" href="/@Flow.Route()/backups"><Icon Name="backup" Size="14" /> Script the backup changes</a></p>
+                                    }
+                                }
+                            </div>
+                        </div>
+
+                        @if (db is not null)
+                        {
+                            <div class="detail-grid">
+                                <div>
+                                    <h4>Backups at a glance</h4>
+                                    <dl class="glance">
+                                        <dt>Point-in-time restore</dt><dd>@(db.PitrRetentionDays is { } p ? $"{p} days" : "unknown")@(db.DiffBackupIntervalHours is { } h ? $" · differential every {h} h" : "")</dd>
+                                        <dt>Earliest restore point</dt><dd>@(db.EarliestRestoreDate is { } e ? $"{e:yyyy-MM-dd HH:mm} UTC" : "—")</dd>
+                                        <dt>Long-term retention</dt><dd>@(db.LtrRead ? BackupPlanService.LtrLabel(db.WeeklyRetention, db.MonthlyRetention, db.YearlyRetention) : "unknown")</dd>
+                                        <dt>Backup storage</dt><dd>@BackupPlanService.RedundancyLabel(db.BackupStorageRedundancy)</dd>
+                                        <dt>Geo-replica</dt><dd>@(db.HasFailoverGroup ? $"failover group '{db.FailoverGroupName}'" : db.GeoReplicas.Count > 0 ? string.Join(", ", db.GeoReplicas.Select(g => $"{g.PartnerServer} ({g.PartnerLocation})")) : "none")</dd>
+                                        <dt>Zone redundant</dt><dd>@(db.ZoneRedundant ? (db.ZoneRedundancyFromPool ? $"yes (pool '{db.ElasticPoolName}')" : "yes") : db.SupportsZoneRedundancy ? "no" : $"not available on {db.Tier}")</dd>
+                                        <dt>Size / tier</dt><dd>@db.TierLabel@(string.IsNullOrEmpty(db.ServiceObjective) ? "" : $" · {db.ServiceObjective}")@(db.MaxSizeBytes is null ? "" : $" · max {db.MaxSizeLabel}")</dd>
+                                    </dl>
+                                </div>
+                                <div>
+                                    <h4>@Flow.HostLabel() settings</h4>
+                                    @if (server is null)
+                                    {
+                                        <p class="muted small">The @Flow.HostLabel() was not found in the scan.</p>
+                                    }
+                                    else
+                                    {
+                                        <dl class="glance">
+                                            <dt>Public access</dt><dd>@PublicAccessLabel(server)</dd>
+                                            <dt>Minimum TLS</dt><dd>@(string.IsNullOrEmpty(server.MinimalTlsVersion) ? "not enforced" : server.MinimalTlsVersion)</dd>
+                                            <dt>Entra admin</dt><dd>@(server.HasEntraAdmin ? $"{server.EntraAdminLogin} · Entra-only {YesNo(server.EntraOnlyAuthentication)}" : "none (SQL authentication only)")</dd>
+                                            <dt>Defender for SQL</dt><dd>@YesNo(server.DefenderEnabled)@(server.DefenderEnabled == true ? $" · vulnerability assessment {YesNo(server.VulnerabilityAssessmentEnabled)}" : "")</dd>
+                                            @if (Flow == SqlFlowKind.SqlDatabase)
+                                            {
+                                                <dt>Auditing</dt><dd>@YesNo(server.AuditingEnabled)@(server.AuditDestinations.Count > 0 ? $" → {string.Join(", ", server.AuditDestinations)}" : "")</dd>
+                                            }
+                                            <dt>TDE key</dt><dd>@(string.IsNullOrEmpty(server.EncryptionProtector) ? "unknown" : server.UsesCustomerManagedKey ? "customer-managed (Key Vault)" : "service-managed")</dd>
+                                        </dl>
+                                        <p class="small mt"><button class="link" @onclick="() => ToggleServer(server.Id)">@(_expandedServers.Contains(server.Id) ? "Hide" : "Show") full @Flow.HostLabel() detail below</button></p>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </article>
+        }
+    </section>
+}
+
+<section class="card">
+    <div class="card-head">
+        <h2 class="card-title">Findings <span class="count">@Scan.Findings.Count</span></h2>
+        <span class="muted small">Report only — nothing is changed. Each finding comes with its fix.</span>
+    </div>
+    @if (Scan.Findings.Count == 0)
+    {
+        <p class="ok"><Icon Name="check" Size="16" /> No issues found — every server is locked down and every database is well backed up.</p>
+    }
+    else
+    {
+        @foreach (var group in Scan.Findings.GroupBy(f => f.Severity).OrderBy(g => SqlFindingsBuilder.SeverityOrder(g.Key)))
+        {
+            <h4 class="sev-head"><span class="sev @group.Key.ToLowerInvariant()">@group.Key</span> <span class="muted">@SeverityHeading(group.Key) · @group.Count()</span></h4>
+            <ul class="findings">
+                @foreach (var f in group)
+                {
+                    var key = f.ResourceId + "|" + f.Category + "|" + f.Message;
+                    var openFix = _openFixes.Contains(key);
+                    <li>
+                        <div class="finding-main">
+                            <span class="finding-cat"><span class="area-pill @f.Area.ToLowerInvariant()">@f.Area</span>@f.Category</span>
+                            <span class="finding-msg">@f.Message</span>
+                            <span class="muted small">@Flows.SubscriptionName(f.SubscriptionId)</span>
+                        </div>
+                        <button class="link small" @onclick="() => ToggleFix(key)">@(openFix ? "Hide fix" : "How to fix")</button>
+                        @if (openFix)
+                        {
+                            <div class="fix"><Icon Name="bolt" Size="14" /> @f.Fix</div>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    }
+</section>
+
+<section class="card">
+    <div class="card-head">
+        <h2 class="card-title">@(Flow == SqlFlowKind.SqlDatabase ? "Logical servers" : "Managed instances") <span class="count">@Scan.Servers.Count</span></h2>
+        <span class="muted small">Click a row for firewall rules, failover groups and every setting that was read.</span>
+    </div>
+    @if (Scan.Servers.Count == 0)
+    {
+        <p class="muted">No @Flow.HostPluralLabel() in scope.</p>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="table servers">
+                <thead>
+                    <tr><th></th><th>@(Flow == SqlFlowKind.SqlDatabase ? "Server" : "Instance")</th><th>Public access</th><th>TLS</th><th>Entra admin</th><th>Defender</th>@if (Flow == SqlFlowKind.SqlDatabase) { <th>Auditing</th> }<th class="num">Databases</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var s in Scan.Servers.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+                    {
+                        var open = _expandedServers.Contains(s.Id);
+                        var dbCount = Scan.DatabasesOn(s.Id).Count();
+                        <tr class="server-row @(open ? "open" : "")" @onclick="() => ToggleServer(s.Id)">
+                            <td><Icon Name="@(open ? "down" : "chevron")" Size="16" Class="muted" /></td>
+                            <td><b>@s.Name</b><div class="muted small">@Flows.SubscriptionName(s.SubscriptionId) · @s.Location</div></td>
+                            <td>@PublicAccessBadge(s)</td>
+                            <td>@(SqlRatingService.TlsIsModern(s.MinimalTlsVersion) ? Badge(s.MinimalTlsVersion, "ok") : Badge(string.IsNullOrEmpty(s.MinimalTlsVersion) ? "none" : s.MinimalTlsVersion, "bad"))</td>
+                            <td>@(s.HasEntraAdmin ? (s.EntraOnlyAuthentication == true ? Badge("Entra-only", "ok") : Badge("Entra + SQL", "warn")) : Badge("SQL only", "bad"))</td>
+                            <td>@BoolBadge(s.DefenderEnabled)</td>
+                            @if (Flow == SqlFlowKind.SqlDatabase) { <td>@BoolBadge(s.AuditingEnabled)</td> }
+                            <td class="num">@dbCount</td>
+                        </tr>
+                        @if (open)
+                        {
+                            <tr class="policy-detail-row"><td colspan="@(Flow == SqlFlowKind.SqlDatabase ? 8 : 7)"><ServerDetail Server="s" Scan="Scan" /></td></tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+
+<div class="actions end">
+    @if (Scan.Ratings.Count > 0)
+    {
+        <a class="btn btn-primary" href="/@Flow.Route()/backups"><Icon Name="backup" Size="16" /> Plan the backup improvements <Icon Name="arrow" Size="16" /></a>
+    }
+</div>
+
+<ReportModal @ref="_report" Flow="Flow" />
+
+@code {
+    [Parameter] public SqlFlowKind Flow { get; set; }
+
+    private ReportModal _report = default!;
+    private bool _showLegend;
+    private readonly HashSet<string> _expanded = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _expandedServers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _openFixes = new(StringComparer.OrdinalIgnoreCase);
+
+    private SqlScanResult? Scan => Flows.State.For(Flow).Scan;
+
+    private int HighFindings => Scan?.Findings.Count(f => f.Severity == "High") ?? 0;
+
+    protected override void OnInitialized()
+    {
+        // Open the weakest database by default so the first thing on screen is what to fix.
+        if (Scan is { Ratings.Count: > 0 } && _expanded.Count == 0)
+            _expanded.Add(SqlRatingService.Worst(Scan.Ratings)!.TargetId);
+    }
+
+    private void Toggle(string id) { if (!_expanded.Remove(id)) _expanded.Add(id); }
+    private void ToggleServer(string id) { if (!_expandedServers.Remove(id)) _expandedServers.Add(id); }
+    private void ToggleFix(string key) { if (!_openFixes.Remove(key)) _openFixes.Add(key); }
+
+    private static string ScoreClass(int earned, int possible) => earned >= possible * 0.9 ? "ok" : earned >= possible * 0.6 ? "warn" : "bad";
+    private static string YesNo(bool? v) => v switch { true => "on", false => "off", null => "unknown" };
+
+    private static string PublicAccessLabel(SqlServerInfo s) => s.PublicNetworkAccess switch
+    {
+        false => s.Kind == SqlFlowKind.ManagedInstance ? "public endpoint disabled" : $"disabled{(s.PrivateEndpointCount > 0 ? $" · {s.PrivateEndpointCount} private endpoint(s)" : "")}",
+        true => s.Kind == SqlFlowKind.ManagedInstance ? "public data endpoint enabled"
+            : s.OpenToInternet ? "enabled — OPEN TO THE INTERNET"
+            : $"enabled · {s.FirewallRules?.Count.ToString() ?? "?"} firewall rule(s){(s.AllowAzureServices ? " · Azure services allowed" : "")}{(s.PrivateEndpointCount > 0 ? $" · {s.PrivateEndpointCount} private endpoint(s)" : "")}",
+        _ => "unknown"
+    };
+
+    private static string SeverityHeading(string severity) => severity switch
+    {
+        "High" => "Fix first", "Medium" => "Fix soon", _ => "Worth reviewing"
+    };
+
+    private static RenderFragment Badge(string text, string cls) => __builder =>
+    {
+        <span class="badge @cls">@text</span>
+    };
+
+    private static RenderFragment BoolBadge(bool? value) => value switch
+    {
+        true => Badge("On", "ok"),
+        false => Badge("Off", "bad"),
+        _ => Badge("Unknown", "")
+    };
+
+    private static RenderFragment PublicAccessBadge(SqlServerInfo s) => s.PublicNetworkAccess switch
+    {
+        false => Badge("Private", "ok"),
+        true => s.OpenToInternet ? Badge("Open to internet", "bad") : s.AllowAzureServices ? Badge("Public + Azure services", "warn") : Badge("Public", "warn"),
+        _ => Badge("Unknown", "")
+    };
+
+    private static RenderFragment CategoryTable(IEnumerable<SqlRatingCategory> cats) => __builder =>
+    {
+        <table class="cats">
+            @foreach (var c in cats)
+            {
+                <tr>
+                    <td class="cat-name">@c.Name</td>
+                    <td class="cat-bar"><span><span style="width:@(c.Possible == 0 ? 0 : c.Earned * 100 / c.Possible)%;" class="@(c.Earned == c.Possible ? "full" : c.Earned == 0 ? "none" : "")"></span></span></td>
+                    <td class="cat-score @(c.Earned == c.Possible ? "ok" : c.Earned == 0 ? "bad" : "")">@c.Earned<span class="muted">/@c.Possible</span></td>
+                    <td class="cat-notes muted">@string.Join(" ", c.Details)</td>
+                </tr>
+            }
+        </table>
+    };
+}

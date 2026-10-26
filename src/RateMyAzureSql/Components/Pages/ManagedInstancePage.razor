@@ -1,0 +1,9 @@
+@page "/managed-instance"
+@page "/managed-instance/{Step}"
+
+<PageTitle>Managed Instances · RateMyAzureSQL</PageTitle>
+<SqlFlow Flow="SqlFlowKind.ManagedInstance" Step="@Step" />
+
+@code {
+    [Parameter] public string? Step { get; set; }
+}
