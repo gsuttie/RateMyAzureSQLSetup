@@ -50,7 +50,7 @@ public sealed class AzureApi : IAzureApi
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             request.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
-            using var response = await client.SendAsync(request, ct);
+            using var response = await SendWithRetryAsync(client, request, ct);
             var json = await response.Content.ReadAsStringAsync(ct);
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException(
@@ -79,7 +79,7 @@ public sealed class AzureApi : IAzureApi
             using var request = new HttpRequestMessage(HttpMethod.Get, next);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            using var response = await client.SendAsync(request, ct);
+            using var response = await SendWithRetryAsync(client, request, ct);
             var json = await response.Content.ReadAsStringAsync(ct);
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException($"HTTP {(int)response.StatusCode}: {Truncate(json, 300)}");
@@ -102,7 +102,7 @@ public sealed class AzureApi : IAzureApi
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        using var response = await client.SendAsync(request, ct);
+        using var response = await SendWithRetryAsync(client, request, ct);
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
         var json = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
@@ -110,6 +110,77 @@ public sealed class AzureApi : IAzureApi
 
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.Clone();
+    }
+
+    /// <summary>Maximum retry attempts for throttled (429) or transient (5xx / network) ARM responses.</summary>
+    internal const int MaxRetries = 5;
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Sends the request, retrying on ARM throttling (HTTP 429 "SubscriptionRequestsThrottled") and transient
+    /// failures (408, 502, 503, 504, socket errors) with exponential backoff. The ARM Retry-After header is
+    /// honoured when present. The request is cloned per attempt because HttpRequestMessage is single-use.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithRetryAsync(HttpClient client, HttpRequestMessage request, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            HttpResponseMessage? response = null;
+            Exception? transient = null;
+            try
+            {
+                using var clone = await CloneAsync(request, ct);
+                response = await client.SendAsync(clone, ct);
+                if (!IsRetryable(response.StatusCode) || attempt >= MaxRetries) return response;
+            }
+            catch (HttpRequestException ex) when (attempt < MaxRetries)
+            {
+                transient = ex;
+            }
+
+            var delay = RetryDelay(attempt, response);
+            _logger.LogInformation(
+                "ARM request to {Url} {Reason}; retrying in {Delay:0.#}s (attempt {Attempt}/{Max}).",
+                request.RequestUri?.AbsolutePath,
+                response is not null ? $"returned HTTP {(int)response.StatusCode}" : $"failed ({transient?.Message})",
+                delay.TotalSeconds, attempt + 1, MaxRetries);
+            response?.Dispose();
+            await Task.Delay(delay, ct);
+        }
+    }
+
+    internal static bool IsRetryable(HttpStatusCode status) => status is
+        HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout or
+        HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
+
+    /// <summary>Retry-After (seconds or HTTP date) if ARM supplied one, otherwise 2^attempt seconds with jitter, capped.</summary>
+    internal static TimeSpan RetryDelay(int attempt, HttpResponseMessage? response)
+    {
+        var retryAfter = response?.Headers.RetryAfter;
+        TimeSpan? fromHeader = retryAfter?.Delta ??
+            (retryAfter?.Date is { } date ? date - DateTimeOffset.UtcNow : null);
+        if (fromHeader is { } h && h > TimeSpan.Zero)
+            return h < MaxRetryDelay ? h : MaxRetryDelay;
+
+        var seconds = Math.Pow(2, attempt) + Random.Shared.NextDouble();
+        var backoff = TimeSpan.FromSeconds(seconds);
+        return backoff < MaxRetryDelay ? backoff : MaxRetryDelay;
+    }
+
+    private static async Task<HttpRequestMessage> CloneAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        var clone = new HttpRequestMessage(request.Method, request.RequestUri) { Version = request.Version };
+        foreach (var header in request.Headers)
+            clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        if (request.Content is not null)
+        {
+            var bytes = await request.Content.ReadAsByteArrayAsync(ct);
+            var content = new ByteArrayContent(bytes);
+            foreach (var header in request.Content.Headers)
+                content.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            clone.Content = content;
+        }
+        return clone;
     }
 
     private async Task<string> GetTokenAsync(string? tenantId, string[] scopes, CancellationToken ct)

@@ -22,24 +22,48 @@ public sealed class SqlDiscoveryService
 
     internal const string Api = "2021-11-01";
     private const string ExpressVaApi = "2022-02-01-preview";
-    private const int Parallelism = 8;
+    /// <summary>
+    /// Concurrent ARM reads per scan. ARM allows ~12,000 reads/hour per subscription, but a short burst from a
+    /// per-database fan-out can still trip "SubscriptionRequestsThrottled" (HTTP 429); AzureApi retries those
+    /// with backoff, so this only needs to be low enough that the retries converge.
+    /// </summary>
+    private const int Parallelism = 4;
+
+    /// <summary>
+    /// Resource groups and resources whose name contains this word are restore targets / scratch copies,
+    /// not production estate, and are excluded from discovery and rating entirely.
+    /// </summary>
+    internal const string ExcludedNameFragment = "restore";
+
+    /// <summary>KQL fragment that drops anything whose resource group or resource id path contains the excluded word.</summary>
+    private static readonly string ExclusionFilter =
+        $"| where resourceGroup !contains '{ExcludedNameFragment}' and id !contains '{ExcludedNameFragment}' ";
 
     private static readonly string SummaryQuery =
         $"Resources | where type in~ ('{TypeServer}','{TypeDatabase}','{TypeManagedInstance}','{TypeManagedDatabase}') " +
         $"| where not(type =~ '{TypeDatabase}' and kind contains 'system') " +
+        ExclusionFilter +
         "| summarize cnt = count() by subscriptionId, type";
 
     private const string Projection = "| project id, name, type, location, resourceGroup, subscriptionId, kind, sku, properties";
 
     private static string HostQuery(SqlFlowKind flow) =>
-        $"Resources | where type =~ '{(flow == SqlFlowKind.SqlDatabase ? TypeServer : TypeManagedInstance)}' {Projection}";
+        $"Resources | where type =~ '{(flow == SqlFlowKind.SqlDatabase ? TypeServer : TypeManagedInstance)}' {ExclusionFilter}{Projection}";
 
     private static string DatabaseQuery(SqlFlowKind flow) => flow == SqlFlowKind.SqlDatabase
-        ? $"Resources | where type =~ '{TypeDatabase}' | where kind !contains 'system' {Projection}"
-        : $"Resources | where type =~ '{TypeManagedDatabase}' {Projection}";
+        ? $"Resources | where type =~ '{TypeDatabase}' | where kind !contains 'system' {ExclusionFilter}{Projection}"
+        : $"Resources | where type =~ '{TypeManagedDatabase}' {ExclusionFilter}{Projection}";
 
     private static readonly string PoolQuery =
-        $"Resources | where type =~ '{TypePool}' | project id, name, subscriptionId, sku, properties";
+        $"Resources | where type =~ '{TypePool}' {ExclusionFilter}| project id, name, subscriptionId, sku, properties";
+
+    /// <summary>
+    /// Code-side guard matching <see cref="ExclusionFilter"/>: true when the resource group or any segment of the
+    /// resource id (server, instance, database name) contains the excluded word, case-insensitively.
+    /// </summary>
+    internal static bool IsExcluded(string? resourceGroup, string? resourceId) =>
+        (resourceGroup?.Contains(ExcludedNameFragment, StringComparison.OrdinalIgnoreCase) ?? false)
+        || (resourceId?.Contains(ExcludedNameFragment, StringComparison.OrdinalIgnoreCase) ?? false);
 
     private readonly IAzureApi _azure;
     private readonly ILogger<SqlDiscoveryService> _logger;
@@ -93,12 +117,17 @@ public sealed class SqlDiscoveryService
         await Task.WhenAll(hostTask, dbTask, poolTask);
 
         foreach (var row in hostTask.Result)
-            result.Servers.Add(flow == SqlFlowKind.SqlDatabase ? ParseServer(row) : ParseManagedInstance(row));
+        {
+            var server = flow == SqlFlowKind.SqlDatabase ? ParseServer(row) : ParseManagedInstance(row);
+            if (IsExcluded(server.ResourceGroup, server.Id)) continue;
+            result.Servers.Add(server);
+        }
 
         var pools = poolTask.Result.Select(ParsePool).ToDictionary(p => p.Id, p => p.ZoneRedundant, StringComparer.OrdinalIgnoreCase);
         foreach (var row in dbTask.Result)
         {
             var db = flow == SqlFlowKind.SqlDatabase ? ParseDatabase(row) : ParseManagedDatabase(row);
+            if (IsExcluded(db.ResourceGroup, db.Id)) continue;
             if (db.ElasticPoolId is not null && pools.TryGetValue(db.ElasticPoolId, out var poolZr) && poolZr)
             {
                 db.ZoneRedundant = true;

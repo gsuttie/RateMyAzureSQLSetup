@@ -1,6 +1,10 @@
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using RateMyAzureSql.Models;
 using RateMyAzureSql.Services;
+using RateMyAzureSql.Services.Azure;
 using Xunit;
 
 namespace RateMyAzureSql.Tests;
@@ -259,5 +263,34 @@ public class SqlDiscoveryParsingTests
         Assert.Equal(new DateTime(2026, 10, 5, 3, 12, 0), b.BackupTime);
         Assert.Equal(new DateTime(2027, 1, 5, 3, 12, 0), b.ExpirationTime);
         Assert.Equal("Geo", b.StorageRedundancy);
+    }
+
+    [Theory]
+    [InlineData("rg-restore-tests", "/subscriptions/s1/resourceGroups/rg-restore-tests/providers/Microsoft.Sql/servers/srv1", true)]
+    [InlineData("rg-prod", "/subscriptions/s1/resourceGroups/rg-prod/providers/Microsoft.Sql/servers/srv-RESTORE-01", true)]
+    [InlineData("rg-prod", "/subscriptions/s1/resourceGroups/rg-prod/providers/Microsoft.Sql/servers/srv1/databases/orders_restored", true)]
+    [InlineData("rg-prod", "/subscriptions/s1/resourceGroups/rg-prod/providers/Microsoft.Sql/servers/srv1/databases/orders", false)]
+    [InlineData(null, null, false)]
+    public void IsExcluded_SkipsResourceGroupsAndResourcesNamedRestore(string? resourceGroup, string? id, bool expected)
+    {
+        Assert.Equal(expected, SqlDiscoveryService.IsExcluded(resourceGroup, id));
+    }
+
+    [Fact]
+    public void RetryDelay_HonoursRetryAfterHeaderAndCapsBackoff()
+    {
+        using var throttled = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        throttled.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(10));
+        Assert.Equal(TimeSpan.FromSeconds(10), AzureApi.RetryDelay(0, throttled));
+
+        var noHeader = AzureApi.RetryDelay(2, null);
+        Assert.InRange(noHeader.TotalSeconds, 4, 5);
+
+        Assert.Equal(TimeSpan.FromSeconds(60), AzureApi.RetryDelay(20, null));
+
+        Assert.True(AzureApi.IsRetryable(HttpStatusCode.TooManyRequests));
+        Assert.True(AzureApi.IsRetryable(HttpStatusCode.ServiceUnavailable));
+        Assert.False(AzureApi.IsRetryable(HttpStatusCode.Forbidden));
+        Assert.False(AzureApi.IsRetryable(HttpStatusCode.NotFound));
     }
 }
