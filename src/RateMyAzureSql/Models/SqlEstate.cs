@@ -86,6 +86,7 @@ public sealed class SqlServerInfo
     public string Location { get; set; } = string.Empty;
     public string Fqdn { get; set; } = string.Empty;
     public SqlFlowKind Kind { get; set; }
+    public Dictionary<string, string> Tags { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     // ── Network ──────────────────────────────────────────────────────────────
 
@@ -161,6 +162,7 @@ public sealed class SqlDatabaseInfo
     public string SubscriptionId { get; set; } = string.Empty;
     public string Location { get; set; } = string.Empty;
     public SqlFlowKind Kind { get; set; }
+    public Dictionary<string, string> Tags { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>"Basic", "Standard", "Premium", "GeneralPurpose", "BusinessCritical", "Hyperscale", "DataWarehouse".</summary>
     public string Tier { get; set; } = string.Empty;

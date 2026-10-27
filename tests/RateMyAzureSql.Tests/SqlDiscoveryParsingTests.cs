@@ -66,6 +66,7 @@ public class SqlDiscoveryParsingTests
         {
           "id": "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Sql/servers/srv1/databases/orders",
           "name": "orders", "location": "westeurope", "resourceGroup": "rg", "subscriptionId": "s1", "kind": "v12.0,user,vcore,pool",
+          "tags": { "Environment": "Tst", "owner": "data-team" },
           "sku": { "name": "ElasticPool", "tier": "GeneralPurpose", "capacity": 0 },
           "properties": {
             "status": "Online", "currentServiceObjectiveName": "ElasticPool", "zoneRedundant": false, "maxSizeBytes": 34359738368,
@@ -86,6 +87,7 @@ public class SqlDiscoveryParsingTests
         Assert.Equal("ElasticPool", d.SkuName);
         Assert.Equal("pool1", d.ElasticPoolName);
         Assert.Equal("Geo", d.BackupStorageRedundancy); // current wins over requested
+        Assert.Equal("Tst", d.Tags["environment"]);
         Assert.Equal(new DateTime(2026, 10, 19, 9, 35, 58, DateTimeKind.Utc).Date, d.EarliestRestoreDate!.Value.Date);
         Assert.Equal(32L * 1024 * 1024 * 1024, d.MaxSizeBytes);
         Assert.Equal("32 GB", d.MaxSizeLabel);

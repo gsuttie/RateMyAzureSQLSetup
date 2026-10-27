@@ -69,6 +69,173 @@ public class BackupPlanAndReportTests
     }
 
     [Fact]
+    public void LtrEstimate_UsesBackupCompressionAndRetentionOverlapRange()
+    {
+        var estimate = BackupOptionsResearchService.EstimateLtrCost(
+            100L * 1024 * 1024 * 1024, "P4W", "P3M", "P2Y", 0.03m);
+
+        Assert.NotNull(estimate);
+        Assert.Equal(3m, estimate.MinMonthlyUsd);
+        Assert.Equal(9m, estimate.MaxMonthlyUsd);
+        Assert.Equal((4, 9), BackupOptionsResearchService.LtrBackupCountRange("P4W", "P3M", "P2Y"));
+    }
+
+    [Fact]
+    public void LtrEstimate_NoRetentionIsZero_AndUnknownCapacityIsNotEstimated()
+    {
+        Assert.Equal(new BackupCostRange(0, 0), BackupOptionsResearchService.EstimateLtrCost(null, "PT0S", "PT0S", "PT0S", null));
+        Assert.Null(BackupOptionsResearchService.EstimateLtrCost(null, "P4W", "PT0S", "PT0S", 0.03m));
+    }
+
+    [Fact]
+    public void BlobEstimate_UsesConfiguredCapacityAndRetainedCopyCount()
+    {
+        var estimate = BackupOptionsResearchService.EstimateBlobCost(10L * 1024 * 1024 * 1024, 4, 0.02m);
+
+        Assert.Equal(new BackupCostRange(0.8m, 0.8m), estimate);
+    }
+
+    [Fact]
+    public void BlobArchiveTier_RejectsZoneRedundancyButOnlineTiersSupportIt()
+    {
+        Assert.False(BackupOptionsResearchService.IsBlobTierSupported("Archive", "ZRS"));
+        Assert.False(BackupOptionsResearchService.IsBlobTierSupported("Archive", "GZRS"));
+        Assert.True(BackupOptionsResearchService.IsBlobTierSupported("Archive", "RA-GRS"));
+        Assert.True(BackupOptionsResearchService.IsBlobTierSupported("Cold", "GZRS"));
+    }
+
+    [Fact]
+    public void EnvironmentClassification_PrefersTagsThenDelimitedResourceNames()
+    {
+        var database = new SqlDatabaseInfo { Tags = new Dictionary<string, string> { ["Environment"] = "production" }, ResourceGroup = "rg-app-dev" };
+        Assert.Equal("Prod", BackupOptionsResearchService.ClassifyEnvironment(database, null));
+
+        database.Tags.Clear();
+        Assert.Equal("Dev", BackupOptionsResearchService.ClassifyEnvironment(database, null));
+        database.ResourceGroup = "rg-app-testing";
+        Assert.Equal("Tst", BackupOptionsResearchService.ClassifyEnvironment(database, null));
+        database.ResourceGroup = "rg-shared";
+        Assert.Equal("Unclassified", BackupOptionsResearchService.ClassifyEnvironment(database, null));
+        Assert.Equal("Tst", BackupOptionsResearchService.ClassifyEnvironment(database, null, "Contoso Testing"));
+        database.Tags["Environment"] = "sandbox";
+        database.ResourceGroup = "rg-app-prod";
+        Assert.Equal("Unclassified", BackupOptionsResearchService.ClassifyEnvironment(database, null));
+    }
+
+    [Fact]
+    public void EnvironmentAggregation_SumsOptionsAndKeepsUnknownTotalsUnavailable()
+    {
+        static List<BlobTierEstimate> Tiers(decimal hot, decimal cool) =>
+        [
+            new("Hot", 0.02m, new BackupCostRange(hot, hot)),
+            new("Cool", 0.01m, new BackupCostRange(cool, cool)),
+            new("Cold", 0.005m, new BackupCostRange(cool / 2m, cool / 2m)),
+            new("Archive", 0.002m, new BackupCostRange(cool / 5m, cool / 5m))
+        ];
+
+        var estimates = new[]
+        {
+            new DatabaseBackupEstimate("Dev", "db1", "eastus", "10 GB", "weekly", "weekly", new(1, 2), new(3, 4), Tiers(5, 2), null),
+            new DatabaseBackupEstimate("Dev", "db2", "eastus", "20 GB", "unknown", "weekly", null, new(1, 1), Tiers(4, 1), null),
+            new DatabaseBackupEstimate("Prod", "db3", "westeurope", "30 GB", "weekly", "weekly", new(2, 2), new(2, 2), Tiers(3, 2), null)
+        };
+
+        var totals = BackupOptionsResearchService.AggregateByEnvironment(estimates);
+        var dev = totals[0];
+
+        Assert.Equal(["Dev", "Prod"], totals.Select(total => total.Environment).ToArray());
+        Assert.Equal(2, dev.DatabaseCount);
+        Assert.Null(dev.CurrentLtrMonthlyUsd);
+        Assert.Equal(new BackupCostRange(4, 5), dev.PlannedLtrMonthlyUsd);
+        Assert.Equal(new BackupCostRange(9, 9), dev.BlobExportOptions.Single(option => option.Tier == "Hot").MonthlyUsd);
+        Assert.Equal("Archive", dev.CheapestBlobTier?.Tier);
+    }
+
+    [Fact]
+    public async Task Research_RateLimitsConcurrentRetailPriceRequests()
+    {
+        using var limiter = new System.Threading.RateLimiting.TokenBucketRateLimiter(new()
+        {
+            TokenLimit = 1,
+            TokensPerPeriod = 1,
+            ReplenishmentPeriod = TimeSpan.FromHours(1),
+            AutoReplenishment = false,
+            QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+            QueueLimit = 0
+        });
+        var handler = new CountingRetailPriceHandler();
+        using var http = new HttpClient(handler);
+        var service = new BackupOptionsResearchService(http, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), limiter);
+        var scan = new SqlScanResult
+        {
+            Flow = SqlFlowKind.SqlDatabase,
+            Databases = [new SqlDatabaseInfo { Name = "test", Location = "eastus", Kind = SqlFlowKind.SqlDatabase, MaxSizeBytes = 10L * 1024 * 1024 * 1024 }]
+        };
+
+        var result = await service.ResearchAsync(scan, new BackupPlan(), 1, "LRS");
+
+        Assert.Equal(1, handler.RequestCount);
+        Assert.Contains(result.PricingWarnings, warning => warning.Contains("request queue is full", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Research_UsesEnvironmentSizeAssumptionOnlyForUnknownDatabases()
+    {
+        using var limiter = new System.Threading.RateLimiting.TokenBucketRateLimiter(new()
+        {
+            TokenLimit = 2,
+            TokensPerPeriod = 1,
+            ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+            AutoReplenishment = true,
+            QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+            QueueLimit = 2
+        });
+        using var http = new HttpClient(new CountingRetailPriceHandler());
+        var service = new BackupOptionsResearchService(http, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), limiter);
+        var scan = new SqlScanResult
+        {
+            Flow = SqlFlowKind.ManagedInstance,
+            Databases =
+            [
+                new SqlDatabaseInfo { Name = "devdb", ResourceGroup = "rg-mi-dev", ServerName = "mi-dev", SubscriptionId = "sub", Location = "eastus", Kind = SqlFlowKind.ManagedInstance },
+                new SqlDatabaseInfo { Name = "small", ResourceGroup = "rg-mi-dev", ServerName = "mi-dev", SubscriptionId = "sub", Location = "eastus", Kind = SqlFlowKind.ManagedInstance, MaxSizeBytes = 20L * 1024 * 1024 * 1024 }
+            ]
+        };
+
+        var result = await service.ResearchAsync(
+            scan,
+            new BackupPlan(),
+            1,
+            "LRS",
+            environmentSizeEstimatesGb: new Dictionary<string, decimal> { ["Dev"] = 50m });
+
+        var assumed = result.Databases.Single(database => database.DatabaseName == "devdb");
+        var known = result.Databases.Single(database => database.DatabaseName == "small");
+        var dev = Assert.Single(result.EnvironmentTotals);
+        Assert.Equal("50 GB assumed", assumed.Capacity);
+        Assert.Equal(50m, assumed.AssumedSizeGb);
+        Assert.Equal("20 GB", known.Capacity);
+        Assert.Null(known.AssumedSizeGb);
+        Assert.Equal(1, dev.AssumedCapacityDatabaseCount);
+        Assert.Equal(50m, dev.AssumedDatabaseSizeGb);
+    }
+
+    private sealed class CountingRetailPriceHandler : HttpMessageHandler
+    {
+        private int _requestCount;
+        public int RequestCount => Volatile.Read(ref _requestCount);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requestCount);
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"Items\":[],\"NextPageLink\":null}")
+            });
+        }
+    }
+
+    [Fact]
     public void PowerShell_SqlDatabase_ContainsEveryCmdlet_AndBasicTierClamp()
     {
         var scan = Demo();

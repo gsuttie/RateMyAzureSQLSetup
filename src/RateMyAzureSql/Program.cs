@@ -1,6 +1,7 @@
 using Azure.Core;
 using Azure.Identity;
 using Microsoft.AspNetCore.ResponseCompression;
+using System.Threading.RateLimiting;
 using RateMyAzureSql.Components;
 using RateMyAzureSql.Services;
 using RateMyAzureSql.Services.Azure;
@@ -8,6 +9,17 @@ using RateMyAzureSql.Services.Azure;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHttpClient();
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton(_ => new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+{
+    TokenLimit = 2,
+    TokensPerPeriod = 1,
+    ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+    AutoReplenishment = true,
+    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+    QueueLimit = 100
+}));
+builder.Services.AddHttpClient<BackupOptionsResearchService>(client => client.Timeout = TimeSpan.FromSeconds(15));
 
 builder.Services.AddResponseCompression(opts =>
 {

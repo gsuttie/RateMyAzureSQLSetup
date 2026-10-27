@@ -1,6 +1,8 @@
 using Bunit;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Threading.RateLimiting;
 using RateMyAzureSql.Components.Shared;
 using RateMyAzureSql.Models;
 using RateMyAzureSql.Services;
@@ -26,8 +28,19 @@ public class ComponentTests : BunitContext
     public ComponentTests()
     {
         var credential = new global::Azure.Identity.AzureCliCredential();
+        var priceLimiter = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+        {
+            TokenLimit = 2,
+            TokensPerPeriod = 1,
+            ReplenishmentPeriod = TimeSpan.FromSeconds(1),
+            AutoReplenishment = true,
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 10
+        });
         Services.AddSingleton<global::Azure.Core.TokenCredential>(credential);
         Services.AddSingleton<IAzureApi, ThrowingAzureApi>();
+        Services.AddSingleton(priceLimiter);
+        Services.AddSingleton(new BackupOptionsResearchService(new HttpClient(), new MemoryCache(new MemoryCacheOptions()), priceLimiter));
         Services.AddSingleton(new SqlDiscoveryService(new ThrowingAzureApi(), NullLogger<SqlDiscoveryService>.Instance));
         Services.AddScoped(_ => new AzureSubscriptionService(credential, NullLogger<AzureSubscriptionService>.Instance));
         Services.AddScoped<SessionState>();

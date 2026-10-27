@@ -1,4 +1,5 @@
 @inject SqlFlowService Flows
+@inject BackupOptionsResearchService BackupResearch
 
 @if (Scan is null)
 {
@@ -91,6 +92,171 @@
             @foreach (var n in BackupPlanService.CostNotes) { <li>@n</li> }
         </ul>
     }
+
+    <section class="backup-research">
+        <div class="research-head">
+            <div>
+                <h3>Research backup options</h3>
+                <p class="muted small">Compare the current setup with this plan and customer-managed archive options. Nothing is changed by this app.</p>
+            </div>
+            <label class="field research-copies">
+                <span class="field-label">Archive copies retained</span>
+                <select class="select" value="@_archiveCopies" @onchange="SetArchiveCopies">
+                    <option value="1">1 copy</option>
+                    <option value="4">4 copies</option>
+                    <option value="12">12 copies</option>
+                </select>
+            </label>
+            <label class="field research-copies">
+                <span class="field-label">Storage redundancy</span>
+                <select class="select" value="@_blobRedundancy" @onchange="SetBlobRedundancy">
+                    @foreach (var (key, label) in BackupOptionsResearchService.BlobRedundancyChoices)
+                    {
+                        <option value="@key">@label</option>
+                    }
+                </select>
+            </label>
+            <button class="btn btn-ghost btn-sm" @onclick="ResearchOptionsAsync" disabled="@_researchLoading">
+                <Icon Name="@( _researchLoading ? "clock" : "search")" Size="14" />
+                @(_researchLoading ? "Researching…" : _research is null ? "Research options" : "Refresh estimate")
+            </button>
+        </div>
+
+        @if (_researchError is not null)
+        {
+            <p class="bad small mt">@_researchError</p>
+        }
+        else if (_research is { } research)
+        {
+            <div class="research-options">
+                <div class="research-option">
+                    <b>Azure-managed PITR + LTR</b>
+                    <span>Best fit for operational recovery and retention within Azure SQL. The table estimates LTR storage from configured capacity; PITR overage needs actual backup-consumption metrics.</span>
+                </div>
+                <div class="research-option">
+                    <b>Exports in Azure Blob Storage · @research.BlobRedundancy</b>
+                    <span>BACPAC is portable for migration or analysis, not a point-in-time recovery backup. Copy-only .bak applies to Managed Instance. Estimates use one configured-capacity equivalent per retained copy.</span>
+                </div>
+                @if (research.IsManagedInstance)
+                {
+                    <div class="research-option">
+                        <b>Copy-only full backup in Blob Storage</b>
+                        <span>Customer-managed SQL backup files can help with immutable storage or retention beyond 10 years. Scheduling, monitoring, and restore testing become your responsibility.</span>
+                    </div>
+                }
+            </div>
+
+            @if (research.Suggestions.Count > 0)
+            {
+                <h4 class="mt">Suggestions for this estate</h4>
+                <ul class="research-suggestions">
+                    @foreach (var suggestion in research.Suggestions) { <li>@suggestion</li> }
+                </ul>
+            }
+
+            <h4 class="mt">Total estimated monthly cost by environment</h4>
+            <p class="muted small">Environment/Env tags take precedence, followed by resource-group/server names, subscription names, and database names. Unknown labels stay in Unclassified. Enter an average size for databases with unknown capacity to include them in the totals.</p>
+            <div class="table-wrap mt">
+                <table class="table environment-cost-table">
+                    <thead>
+                        <tr>
+                            <th>Environment</th><th>Databases</th><th>Unknown DB size (GB)</th><th>Current LTR / month</th><th>Plan LTR / month</th>
+                            @foreach (var tier in BackupOptionsResearchService.BlobAccessTiers) { <th>@tier / month</th> }
+                            <th>Lowest storage cost</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var environment in research.EnvironmentTotals)
+                        {
+                            <tr>
+                                <td><b>@environment.Environment</b></td>
+                                <td>@environment.DatabaseCount</td>
+                                <td>
+                                    @if (environment.MissingCapacityDatabaseCount > 0 || environment.AssumedCapacityDatabaseCount > 0)
+                                    {
+                                        <input class="input research-size-input" type="number" min="0.1" max="1000000" step="1"
+                                               value="@environment.AssumedDatabaseSizeGb" placeholder="GB per DB"
+                                               aria-label="Average database size assumption for @environment.Environment"
+                                               @onchange="e => SetEnvironmentSizeAsync(environment.Environment, e)" />
+                                        <span class="muted small block">
+                                            @(environment.AssumedCapacityDatabaseCount > 0
+                                                ? $"Applied to {environment.AssumedCapacityDatabaseCount} database(s)"
+                                                : $"{environment.MissingCapacityDatabaseCount} database(s) need a size")
+                                        </span>
+                                    }
+                                    else { <span class="muted small">not needed</span> }
+                                </td>
+                                <td>@FormatCost(environment.CurrentLtrMonthlyUsd)</td>
+                                <td>@FormatCost(environment.PlannedLtrMonthlyUsd)</td>
+                                @foreach (var option in environment.BlobExportOptions) { <td>@FormatCost(option.MonthlyUsd)</td> }
+                                <td>
+                                    @if (environment.CheapestBlobTier is { } cheapest)
+                                    {
+                                        <span>@cheapest.Tier · @FormatCost(cheapest.MonthlyUsd)</span>
+                                        @if (environment.BlobSavingsVsHot is decimal savings && savings > 0m) { <span class="muted small block">Save $@savings.ToString("N2") / month vs Hot</span> }
+                                    }
+                                    else { <span>unavailable</span> }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="table-wrap mt">
+                <table class="table research-table">
+                    <thead>
+                        <tr>
+                            <th>Environment</th><th>Database</th><th>Capacity proxy</th><th>Current LTR</th><th>Current LTR / month</th>
+                            <th>Plan LTR</th><th>Plan LTR / month</th>
+                            @foreach (var tier in BackupOptionsResearchService.BlobAccessTiers) { <th>@tier / month</th> }
+                            <th>Lowest storage cost</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var estimate in research.Databases)
+                        {
+                            <tr>
+                                <td>@estimate.Environment</td>
+                                <td><b>@estimate.DatabaseName</b><span class="muted small block">@estimate.Region</span></td>
+                                <td>@estimate.Capacity</td>
+                                <td class="small">@estimate.CurrentLtr</td>
+                                <td>@FormatCost(estimate.CurrentLtrMonthlyUsd)</td>
+                                <td class="small">@estimate.PlannedLtr</td>
+                                <td>@FormatCost(estimate.PlannedLtrMonthlyUsd)</td>
+                                @foreach (var option in estimate.BlobExportOptions) { <td>@FormatCost(option.MonthlyUsd)</td> }
+                                <td>
+                                    @if (estimate.CheapestBlobTier is { } cheapest)
+                                    {
+                                        <span>@cheapest.Tier · @FormatCost(cheapest.MonthlyUsd)</span>
+                                        @if (estimate.BlobSavingsVsHot is decimal savings && savings > 0m) { <span class="muted small block">Save $@savings.ToString("N2") / month vs Hot</span> }
+                                    }
+                                    else { <span>unavailable</span> }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            @if (research.PricingWarnings.Count > 0)
+            {
+                <ul class="research-warnings">
+                    @foreach (var warning in research.PricingWarnings) { <li>@warning</li> }
+                </ul>
+            }
+            <p class="muted small mt">
+                Microsoft retail pay-as-you-go prices in USD, retrieved @research.PricesRetrievedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm") local time. LTR assumes full backups compress to 25–33% of configured maximum size and retained weekly/monthly/yearly backups may overlap. Blob estimates use one configured-maximum-size equivalent per retained copy. Estimates are gross storage costs before any included SQL backup allowance; actual usage, discounts, Blob transactions, retrieval, egress, and restore compute are excluded. Compare archive tiers only when the retention and recovery profile can absorb minimum-retention and rehydration costs.
+                <a href="https://learn.microsoft.com/azure/azure-sql/database/automated-backups-overview?view=azuresql" target="_blank" rel="noopener noreferrer">SQL backup billing assumptions</a> ·
+                <a href="https://learn.microsoft.com/azure/storage/blobs/access-tiers-overview" target="_blank" rel="noopener noreferrer">Blob access tier terms</a> ·
+                <a href="https://prices.azure.com/api/retail/prices" target="_blank" rel="noopener noreferrer">Retail Prices API</a>
+            </p>
+        }
+        else if (!_researchLoading)
+        {
+            <p class="muted small mt">Estimates use configured maximum database size as a proxy because actual used data and backup consumption aren't discovered by this scan.</p>
+        }
+    </section>
 </div>
 
 <div class="card">
@@ -246,6 +412,12 @@
     private string _presetKey = "recommended";
     private BackupPlan _plan = BackupPlanService.Presets[1].Plan;
     private bool _showCosts;
+    private int _archiveCopies = 1;
+    private string _blobRedundancy = "LRS";
+    private readonly Dictionary<string, decimal> _environmentSizeEstimatesGb = new(StringComparer.OrdinalIgnoreCase);
+    private bool _researchLoading;
+    private BackupOptionsResearchResult? _research;
+    private string? _researchError;
     private readonly HashSet<string> _selected = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _expanded = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _ltrLoading = new(StringComparer.OrdinalIgnoreCase);
@@ -267,8 +439,8 @@
             _expanded.Add(Scan.Ratings.OrderBy(r => r.BackupScore).First().TargetId);
     }
 
-    private void ApplyPreset(BackupPlanService.Preset p) { _presetKey = p.Key; _plan = p.Plan; }
-    private void Set(Func<BackupPlan, BackupPlan> change) { _plan = change(_plan); _presetKey = "custom"; }
+    private void ApplyPreset(BackupPlanService.Preset p) { _presetKey = p.Key; _plan = p.Plan; ClearResearch(); }
+    private void Set(Func<BackupPlan, BackupPlan> change) { _plan = change(_plan); _presetKey = "custom"; ClearResearch(); }
     private void SetPitr(ChangeEventArgs e) => Set(p => p with { PitrDays = int.TryParse(e.Value?.ToString(), out var n) ? n : 7 });
     private void SetDiff(ChangeEventArgs e) => Set(p => p with { DiffHours = int.TryParse(e.Value?.ToString(), out var n) ? n : 12 });
     private void SetWeekly(ChangeEventArgs e) => Set(p => p with { Weekly = e.Value?.ToString() ?? "PT0S" });
@@ -277,6 +449,56 @@
     private void SetRedundancy(ChangeEventArgs e) => Set(p => p with { Redundancy = e.Value?.ToString() ?? "Geo" });
     private void SetZone(ChangeEventArgs e) => Set(p => p with { ZoneRedundant = e.Value is true });
     private void SetFog(ChangeEventArgs e) => Set(p => p with { FailoverGroup = e.Value is true });
+    private void SetArchiveCopies(ChangeEventArgs e)
+    {
+        _archiveCopies = int.TryParse(e.Value?.ToString(), out var copies) ? Math.Clamp(copies, 1, 12) : 1;
+        ClearResearch();
+    }
+
+    private void SetBlobRedundancy(ChangeEventArgs e)
+    {
+        _blobRedundancy = e.Value?.ToString() ?? "LRS";
+        ClearResearch();
+    }
+
+    private async Task SetEnvironmentSizeAsync(string environment, ChangeEventArgs e)
+    {
+        if (decimal.TryParse(e.Value?.ToString(), System.Globalization.NumberStyles.Number,
+            System.Globalization.CultureInfo.InvariantCulture, out var sizeGb) && sizeGb is > 0 and <= 1_000_000)
+            _environmentSizeEstimatesGb[environment] = sizeGb;
+        else
+            _environmentSizeEstimatesGb.Remove(environment);
+
+        await ResearchOptionsAsync();
+    }
+
+    private void ClearResearch() { _research = null; _researchError = null; }
+
+    private async Task ResearchOptionsAsync()
+    {
+        if (Scan is not { } scan) return;
+        _researchLoading = true;
+        _researchError = null;
+        try
+        {
+            var subscriptionNames = scan.SubscriptionIds.ToDictionary(id => id, Flows.SubscriptionName, StringComparer.OrdinalIgnoreCase);
+            _research = await BackupResearch.ResearchAsync(scan, _plan, _archiveCopies, _blobRedundancy, subscriptionNames, _environmentSizeEstimatesGb);
+        }
+        catch (Exception ex)
+        {
+            _researchError = "Could not retrieve current retail prices: " + ex.Message;
+        }
+        finally
+        {
+            _researchLoading = false;
+        }
+    }
+
+    private static string FormatCost(BackupCostRange? estimate) => estimate is null
+        ? "unavailable"
+        : estimate.MinMonthlyUsd == estimate.MaxMonthlyUsd
+            ? $"${estimate.MinMonthlyUsd:N2}"
+            : $"${estimate.MinMonthlyUsd:N2}–${estimate.MaxMonthlyUsd:N2}";
 
     private void ToggleSelected(string id) { if (!_selected.Remove(id)) _selected.Add(id); }
     private void ToggleExpanded(string id) { if (!_expanded.Remove(id)) _expanded.Add(id); }

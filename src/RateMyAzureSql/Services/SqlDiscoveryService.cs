@@ -45,7 +45,7 @@ public sealed class SqlDiscoveryService
         ExclusionFilter +
         "| summarize cnt = count() by subscriptionId, type";
 
-    private const string Projection = "| project id, name, type, location, resourceGroup, subscriptionId, kind, sku, properties";
+    private const string Projection = "| project id, name, type, location, resourceGroup, subscriptionId, kind, sku, tags, properties";
 
     private static string HostQuery(SqlFlowKind flow) =>
         $"Resources | where type =~ '{(flow == SqlFlowKind.SqlDatabase ? TypeServer : TypeManagedInstance)}' {ExclusionFilter}{Projection}";
@@ -207,6 +207,7 @@ public sealed class SqlDiscoveryService
             SubscriptionId = Str(row, "subscriptionId"),
             Location = Str(row, "location"),
             Kind = SqlFlowKind.SqlDatabase,
+            Tags = ParseTags(row),
             Fqdn = Str(props, "fullyQualifiedDomainName"),
             SqlAdminLogin = Str(props, "administratorLogin"),
             MinimalTlsVersion = Str(props, "minimalTlsVersion"),
@@ -229,6 +230,7 @@ public sealed class SqlDiscoveryService
             SubscriptionId = Str(row, "subscriptionId"),
             Location = Str(row, "location"),
             Kind = SqlFlowKind.ManagedInstance,
+            Tags = ParseTags(row),
             Fqdn = Str(props, "fullyQualifiedDomainName"),
             SqlAdminLogin = Str(props, "administratorLogin"),
             MinimalTlsVersion = Str(props, "minimalTlsVersion"),
@@ -260,6 +262,7 @@ public sealed class SqlDiscoveryService
             SubscriptionId = Str(row, "subscriptionId"),
             Location = Str(row, "location"),
             Kind = SqlFlowKind.SqlDatabase,
+            Tags = ParseTags(row),
             Tier = FirstNonEmpty(Str(sku, "tier"), Str(Obj(props, "currentSku"), "tier")),
             SkuName = FirstNonEmpty(Str(sku, "name"), Str(Obj(props, "currentSku"), "name")),
             Capacity = Int(sku, "capacity"),
@@ -292,6 +295,7 @@ public sealed class SqlDiscoveryService
             SubscriptionId = Str(row, "subscriptionId"),
             Location = Str(row, "location"),
             Kind = SqlFlowKind.ManagedInstance,
+            Tags = ParseTags(row),
             Status = Str(props, "status"),
             CreationDate = Date(props, "creationDate"),
             EarliestRestoreDate = Date(props, "earliestRestorePoint"),
@@ -301,6 +305,18 @@ public sealed class SqlDiscoveryService
 
     internal static (string Id, bool ZoneRedundant) ParsePool(JsonElement row) =>
         (Str(row, "id"), Bool(Obj(row, "properties"), "zoneRedundant") == true);
+
+    internal static Dictionary<string, string> ParseTags(JsonElement row)
+    {
+        var tags = Obj(row, "tags");
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (tags.ValueKind != JsonValueKind.Object) return result;
+
+        foreach (var tag in tags.EnumerateObject())
+            if (tag.Value.ValueKind == JsonValueKind.String)
+                result[tag.Name] = tag.Value.GetString() ?? string.Empty;
+        return result;
+    }
 
     internal static void ApplyAdministrators(SqlServerInfo info, JsonElement admins)
     {
